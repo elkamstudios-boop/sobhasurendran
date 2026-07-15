@@ -1,0 +1,7 @@
+node_modules/
+.env
+
+# Runtime caches — regenerated automatically on first request, never source data.
+data/thumbnail-cache.json
+data/views-cache.json
+data/fb-share-link-map.json

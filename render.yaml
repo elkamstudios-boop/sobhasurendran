@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: sobha-surendran-thumbnail-api
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: META_APP_ID
+        sync: false
+      - key: META_APP_SECRET
+        sync: false
+      - key: IG_BUSINESS_ACCOUNT_ID
+        sync: false
+      - key: IG_ACCESS_TOKEN
+        sync: false
+      - key: FB_PAGE_ID
+        sync: false
+      - key: FB_PAGE_ACCESS_TOKEN
+        sync: false
+      - key: CACHE_TTL_HOURS
+        value: "12"
+      - key: VIEWS_CACHE_TTL_HOURS
+        value: "6"

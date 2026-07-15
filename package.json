@@ -1,0 +1,16 @@
+{
+  "name": "thumbnail-fetch-api",
+  "version": "1.0.0",
+  "description": "Fetches real thumbnails for Instagram/Facebook reels (via Meta oEmbed) and news articles (via og:image scraping).",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "node-fetch": "^2.7.0"
+  }
+}
