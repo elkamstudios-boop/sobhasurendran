@@ -182,6 +182,34 @@ Page access tokens obtained this way typically last ~60 days; re-run steps 4–6
 periodically, or (advanced) create a **System User** in Meta Business Manager to get a
 Page token that doesn't expire.
 
+## Setting up Google Sheets (for the Concern / Volunteer forms)
+The site's two forms (`/api/submit-concern`, `/api/submit-volunteer`) each append one
+row to a tab in a Google Sheet you own — it updates live, and you can export it to
+`.xlsx` from Sheets any time (File → Download → Microsoft Excel).
+
+1. **Create the Sheet**: make a new Google Sheet, add two tabs named exactly `Concerns`
+   and `Volunteers`. (Optional: add header rows — the API only appends data rows.)
+2. **Create a Google Cloud project + service account**:
+   [console.cloud.google.com](https://console.cloud.google.com) → create/select a
+   project → **APIs & Services → Library** → enable **Google Sheets API** →
+   **APIs & Services → Credentials** → **Create Credentials → Service Account** → give
+   it any name → **Create and Continue** → skip role assignment → **Done**.
+3. **Create a key for it**: open the service account you just made → **Keys** tab →
+   **Add Key → Create new key → JSON** → downloads a `.json` file. Keep this private —
+   it's a real credential.
+4. **Share the Sheet with it**: open the downloaded JSON, copy the `client_email`
+   value (looks like `something@your-project.iam.gserviceaccount.com`) → in your
+   Google Sheet, click **Share** → paste that email → give it **Editor** access.
+5. **Fill in `.env`**:
+   - `GOOGLE_SERVICE_ACCOUNT_EMAIL` = the `client_email` from the JSON.
+   - `GOOGLE_PRIVATE_KEY` = the `private_key` value from the JSON, pasted as-is
+     (it contains literal `\n` sequences — leave them, the server un-escapes them).
+   - `GOOGLE_SHEET_ID` = the long ID in the Sheet's URL:
+     `docs.google.com/spreadsheets/d/`**`THIS_PART`**`/edit`.
+
+Until these are set, both form endpoints respond with a clear "Google Sheets not
+configured" error instead of silently failing — the rest of the site is unaffected.
+
 ## Assets / attribution note
 Fetched thumbnails remain the property of the original platform/publisher. Store only
 the thumbnail URL (or a cached copy) for display with a link back to the source —

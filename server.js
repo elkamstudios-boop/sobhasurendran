@@ -13,6 +13,8 @@ require('dotenv').config();
 const express = require('express');
 const fetch = require('node-fetch');
 const cheerio = require('cheerio');
+const cron = require('node-cron');
+const { google } = require('googleapis');
 const fs = require('fs');
 const path = require('path');
 
@@ -21,10 +23,16 @@ const PORT = process.env.PORT || 8787;
 
 // The frontend (Sobha Surendran.dc.html) is served from a different origin
 // (the Claude Design preview, or wherever the static site is hosted), so these
-// read-only public GET endpoints need CORS enabled.
-app.use((_req, res, next) => {
+// endpoints need CORS enabled. POST + Content-Type:application/json (the form
+// submit routes) counts as a non-simple request, so browsers send a CORS
+// preflight OPTIONS request first — it must get an explicit 204, not fall
+// through to Express's routing (which would 404 it).
+app.use(express.json());
+app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 const CACHE_TTL_MS = (Number(process.env.CACHE_TTL_HOURS) || 12) * 60 * 60 * 1000;
@@ -32,6 +40,8 @@ const CACHE_PATH = path.join(__dirname, 'data', 'thumbnail-cache.json');
 const VIEWS_CACHE_TTL_MS = (Number(process.env.VIEWS_CACHE_TTL_HOURS) || 6) * 60 * 60 * 1000;
 const VIEWS_CACHE_PATH = path.join(__dirname, 'data', 'views-cache.json');
 const FB_SHARE_MAP_PATH = path.join(__dirname, 'data', 'fb-share-link-map.json');
+const NEWSROOM_CACHE_TTL_MS = (Number(process.env.NEWSROOM_CACHE_TTL_HOURS) || 1) * 60 * 60 * 1000;
+const NEWSROOM_CACHE_PATH = path.join(__dirname, 'data', 'newsroom-cache.json');
 const GRAPH_VERSION = 'v19.0';
 
 function loadCache() {
@@ -54,6 +64,13 @@ function loadShareMap() {
 function saveShareMap(map) {
   fs.mkdirSync(path.dirname(FB_SHARE_MAP_PATH), { recursive: true });
   fs.writeFileSync(FB_SHARE_MAP_PATH, JSON.stringify(map, null, 2));
+}
+function loadNewsroomCache() {
+  try { return JSON.parse(fs.readFileSync(NEWSROOM_CACHE_PATH, 'utf8')); } catch { return null; }
+}
+function saveNewsroomCache(data) {
+  fs.mkdirSync(path.dirname(NEWSROOM_CACHE_PATH), { recursive: true });
+  fs.writeFileSync(NEWSROOM_CACHE_PATH, JSON.stringify({ fetched_at: Date.now(), data }, null, 2));
 }
 
 function detectPlatform(url) {
@@ -338,6 +355,208 @@ async function resolveThumbnail(url, sharedCache) {
   return data;
 }
 
+// ---------------------------------------------------------------------------
+// Newsroom feed (News.dc.html) — aggregates news articles (auto-discovered),
+// your own Facebook posts, Instagram posts, and X posts (once configured)
+// into one normalized, chronologically-sorted feed. Refreshed on a schedule
+// (see the cron job near the bottom) rather than fetched live per visitor.
+// ---------------------------------------------------------------------------
+
+// Google News' public RSS search — no API key needed. Returns recent articles
+// matching the query; each one is then run through the same og:image scraper
+// used for manually-curated article links, so thumbnails work identically.
+async function fetchGoogleNewsRss(query) {
+  const url = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-IN&gl=IN&ceid=IN:en`;
+  const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ThumbnailFetchBot/1.0)' } });
+  if (!res.ok) throw new Error(`Google News RSS ${res.status}`);
+  const xml = await res.text();
+  const $ = cheerio.load(xml, { xmlMode: true });
+  const items = [];
+  $('item').each((_, el) => {
+    const $el = $(el);
+    const title = $el.find('title').first().text();
+    const link = $el.find('link').first().text();
+    const pubDate = $el.find('pubDate').first().text();
+    const source = $el.find('source').first().text();
+    if (title && link) items.push({ title, link, pubDate, source });
+  });
+  return items;
+}
+
+async function getNewsArticles(sharedCache) {
+  const query = process.env.NEWS_SEARCH_QUERY || 'Sobha Surendran';
+  const items = await fetchGoogleNewsRss(query);
+  const top = items.slice(0, 20); // RSS can return a lot of near-duplicate wire coverage
+  return Promise.all(top.map(async (item) => {
+    const resolved = await resolveThumbnail(item.link, sharedCache);
+    return {
+      platform: 'news',
+      title: item.title,
+      summary: null,
+      url: item.link,
+      thumbnail_url: resolved.thumbnail_url,
+      source: item.source || 'News',
+      published_at: item.pubDate ? new Date(item.pubDate).toISOString() : null,
+    };
+  }));
+}
+
+// Recent Page posts (not just videos) — same Page Access Token already used
+// for reel view counts, just a different Graph API edge.
+async function fetchAllFacebookPosts(limit = 15) {
+  const pageId = process.env.FB_PAGE_ID;
+  const token = process.env.FB_PAGE_ACCESS_TOKEN;
+  if (!pageId || !token) return [];
+  const url = `https://graph.facebook.com/${GRAPH_VERSION}/${pageId}/posts` +
+    `?fields=id,message,created_time,permalink_url,full_picture` +
+    `&limit=${limit}&access_token=${encodeURIComponent(token)}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`FB posts list ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  const data = await res.json();
+  return (data.data || []).map((p) => ({
+    platform: 'facebook',
+    title: (p.message || '').split('\n')[0].slice(0, 140) || 'Facebook post',
+    summary: p.message || null,
+    url: p.permalink_url ? new URL(p.permalink_url, 'https://www.facebook.com').toString() : null,
+    thumbnail_url: p.full_picture || null,
+    source: 'Facebook',
+    published_at: p.created_time || null,
+  }));
+}
+
+// Recent Instagram posts (photos + reels) for the feed — a small, cheap fetch
+// distinct from the account-wide media list used for reel view-count matching.
+async function fetchRecentInstagramPosts(limit = 10) {
+  const igId = process.env.IG_BUSINESS_ACCOUNT_ID;
+  const token = process.env.IG_ACCESS_TOKEN;
+  if (!igId || !token) return [];
+  const url = `https://graph.facebook.com/${GRAPH_VERSION}/${igId}/media` +
+    `?fields=id,permalink,caption,thumbnail_url,media_url,timestamp` +
+    `&limit=${limit}&access_token=${encodeURIComponent(token)}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`IG posts list ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  const data = await res.json();
+  return (data.data || []).map((m) => ({
+    platform: 'instagram',
+    title: (m.caption || '').split('\n')[0].slice(0, 140) || 'Instagram post',
+    summary: m.caption || null,
+    url: m.permalink,
+    thumbnail_url: m.thumbnail_url || m.media_url || null,
+    source: 'Instagram',
+    published_at: m.timestamp || null,
+  }));
+}
+
+// X (Twitter) API v2 — requires a paid Developer tier (the free tier no
+// longer supports reading a user's post history). Inactive (returns empty)
+// until X_BEARER_TOKEN / X_USERNAME are set — everything else in the feed
+// works fine without it.
+async function fetchRecentXPosts(limit = 10) {
+  const bearer = process.env.X_BEARER_TOKEN;
+  const username = process.env.X_USERNAME;
+  if (!bearer || !username) return [];
+
+  const userRes = await fetch(`https://api.twitter.com/2/users/by/username/${encodeURIComponent(username)}`, {
+    headers: { Authorization: `Bearer ${bearer}` },
+  });
+  if (!userRes.ok) throw new Error(`X user lookup ${userRes.status}: ${(await userRes.text()).slice(0, 300)}`);
+  const userData = await userRes.json();
+  const userId = userData.data && userData.data.id;
+  if (!userId) return [];
+
+  const tweetsRes = await fetch(
+    `https://api.twitter.com/2/users/${userId}/tweets` +
+    `?max_results=${Math.max(5, Math.min(limit, 100))}` +
+    `&tweet.fields=created_at,text,attachments&expansions=attachments.media_keys&media.fields=url,preview_image_url` +
+    `&exclude=retweets,replies`,
+    { headers: { Authorization: `Bearer ${bearer}` } }
+  );
+  if (!tweetsRes.ok) throw new Error(`X tweets fetch ${tweetsRes.status}: ${(await tweetsRes.text()).slice(0, 300)}`);
+  const tweetsData = await tweetsRes.json();
+  const mediaByKey = {};
+  ((tweetsData.includes && tweetsData.includes.media) || []).forEach((m) => { mediaByKey[m.media_key] = m; });
+
+  return (tweetsData.data || []).map((t) => {
+    const mediaKey = t.attachments && t.attachments.media_keys && t.attachments.media_keys[0];
+    const media = mediaKey ? mediaByKey[mediaKey] : null;
+    return {
+      platform: 'x',
+      title: (t.text || '').split('\n')[0].slice(0, 140) || 'X post',
+      summary: t.text || null,
+      url: `https://x.com/${username}/status/${t.id}`,
+      thumbnail_url: (media && (media.url || media.preview_image_url)) || null,
+      source: 'X (Twitter)',
+      published_at: t.created_at || null,
+    };
+  });
+}
+
+async function buildNewsroomFeed() {
+  const cache = loadCache(); // shared thumbnail cache, used for article og:image resolution
+  // Instagram and X are intentionally not fetched here — Instagram was asked to
+  // be excluded from this feed (still used elsewhere, e.g. the reel carousel),
+  // and X needs a paid Developer tier that isn't set up yet. fetchRecentXPosts
+  // and fetchRecentInstagramPosts are left defined above so either can be
+  // re-added with a one-line change once wanted again.
+  const [news, fbPosts] = await Promise.all([
+    getNewsArticles(cache).catch((err) => { console.error('newsroom: news fetch failed:', err.message); return []; }),
+    fetchAllFacebookPosts().catch((err) => { console.error('newsroom: fb posts fetch failed:', err.message); return []; }),
+  ]);
+  saveCache(cache);
+  return [...news, ...fbPosts]
+    .filter((item) => item.url)
+    .sort((a, b) => new Date(b.published_at || 0) - new Date(a.published_at || 0));
+}
+
+async function getNewsroomFeed(forceRefresh) {
+  if (!forceRefresh) {
+    const cached = loadNewsroomCache();
+    if (cached && Date.now() - cached.fetched_at < NEWSROOM_CACHE_TTL_MS) {
+      return cached.data;
+    }
+  }
+  const feed = await buildNewsroomFeed();
+  saveNewsroomCache(feed);
+  return feed;
+}
+
+// ---------------------------------------------------------------------------
+// Form submissions -> Google Sheets. Each submission appends one row to a
+// tab in a Sheet you own — opens/updates instantly like any live document,
+// and can be exported to .xlsx from Sheets any time with one click.
+// Requires a Google Cloud service account (see README "Setting up Google
+// Sheets") — GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_PRIVATE_KEY, GOOGLE_SHEET_ID.
+// ---------------------------------------------------------------------------
+
+function getSheetsClient() {
+  const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+  // Private keys are stored in env vars as a single line with literal "\n"
+  // sequences (real newlines don't survive most .env / host dashboard
+  // input fields), so they must be un-escaped back into actual newlines.
+  const key = (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
+  if (!email || !key) return null;
+  const auth = new google.auth.JWT(email, null, key, ['https://www.googleapis.com/auth/spreadsheets']);
+  return google.sheets({ version: 'v4', auth });
+}
+
+async function appendToSheet(sheetTabName, rowValues) {
+  const sheets = getSheetsClient();
+  const sheetId = process.env.GOOGLE_SHEET_ID;
+  if (!sheets || !sheetId) {
+    throw new Error(
+      'Google Sheets not configured — set GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_PRIVATE_KEY, ' +
+      'and GOOGLE_SHEET_ID. See README.md "Setting up Google Sheets".'
+    );
+  }
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: sheetId,
+    range: `${sheetTabName}!A:Z`,
+    valueInputOption: 'USER_ENTERED',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: { values: [rowValues] },
+  });
+}
+
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 app.get('/api/thumbnail', async (req, res) => {
@@ -442,6 +661,67 @@ app.get('/api/most-viewed', async (req, res) => {
   const limited = limit ? filtered.slice(0, limit) : filtered;
   res.json({ count: limited.length, results: limited });
 });
+
+// Unified newsroom feed for News.dc.html: news articles + Facebook posts +
+// Instagram posts + X posts (once configured), newest first. Served from
+// cache — refreshed hourly by the cron job below, not fetched live per visitor.
+app.get('/api/newsroom', async (req, res) => {
+  try {
+    const feed = await getNewsroomFeed(req.query.refresh === 'true');
+    const cached = loadNewsroomCache();
+    res.json({ count: feed.length, items: feed, updated_at: cached ? cached.fetched_at : null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Manual trigger — useful for an external uptime-ping service to both keep a
+// free-tier host awake AND force a refresh outside the hourly schedule.
+app.post('/api/newsroom/refresh', async (_req, res) => {
+  try {
+    const feed = await getNewsroomFeed(true);
+    res.json({ refreshed: true, count: feed.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/submit-concern', async (req, res) => {
+  const { name, phone, panchayat, assembly, ward, booth, message } = req.body || {};
+  if (!name || !message) return res.status(400).json({ error: 'name and message are required' });
+  try {
+    await appendToSheet('Concerns', [
+      new Date().toISOString(), name, phone || '', panchayat || '', assembly || '', ward || '', booth || '', message,
+    ]);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/submit-volunteer', async (req, res) => {
+  const { name, phone, email, interest } = req.body || {};
+  if (!name || !phone || !email) return res.status(400).json({ error: 'name, phone, and email are required' });
+  try {
+    await appendToSheet('Volunteers', [new Date().toISOString(), name, phone, email, interest || '']);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Refresh the newsroom feed hourly in the background so pages are always
+// served from a warm cache instead of live-fetching on every visitor. Note:
+// on a free-tier host that sleeps after inactivity, this only fires while the
+// instance is actually awake — pair with an external ping (see README) to
+// keep it running continuously.
+cron.schedule('0 * * * *', () => {
+  getNewsroomFeed(true).catch((err) => console.error('scheduled newsroom refresh failed:', err.message));
+});
+
+// Warm the newsroom cache once at startup so the very first request doesn't
+// have to wait on a live fetch across four sources.
+getNewsroomFeed(true).catch((err) => console.error('initial newsroom warm-up failed:', err.message));
 
 app.listen(PORT, () => {
   console.log(`Thumbnail Fetch API listening on http://localhost:${PORT}`);

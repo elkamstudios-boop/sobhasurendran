@@ -22,3 +22,17 @@ services:
         value: "12"
       - key: VIEWS_CACHE_TTL_HOURS
         value: "6"
+      - key: NEWS_SEARCH_QUERY
+        value: "Sobha Surendran"
+      - key: X_BEARER_TOKEN
+        sync: false
+      - key: X_USERNAME
+        value: "SobhaBJP"
+      - key: NEWSROOM_CACHE_TTL_HOURS
+        value: "1"
+      - key: GOOGLE_SERVICE_ACCOUNT_EMAIL
+        sync: false
+      - key: GOOGLE_PRIVATE_KEY
+        sync: false
+      - key: GOOGLE_SHEET_ID
+        sync: false
