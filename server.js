@@ -688,7 +688,7 @@ app.post('/api/newsroom/refresh', async (_req, res) => {
 
 app.post('/api/submit-concern', async (req, res) => {
   const { name, phone, panchayat, assembly, ward, booth, message } = req.body || {};
-  if (!name || !message) return res.status(400).json({ error: 'name and message are required' });
+  if (!name || !phone || !message) return res.status(400).json({ error: 'name, phone, and message are required' });
   try {
     await appendToSheet('Concerns', [
       new Date().toISOString(), name, phone || '', panchayat || '', assembly || '', ward || '', booth || '', message,
