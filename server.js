@@ -225,8 +225,13 @@ async function fetchAllInstagramMedia() {
   let url = `https://graph.facebook.com/${GRAPH_VERSION}/${igId}/media` +
     `?fields=id,permalink,media_type,media_product_type,thumbnail_url,media_url,caption,timestamp` +
     `&limit=50&access_token=${encodeURIComponent(token)}`;
-  while (url) {
-    const res = await fetch(url);
+  // Same reasoning as fetchAllFacebookVideos: this only needs to cover a
+  // small, known set of recent reel URLs, not the account's full history.
+  const MAX_PAGES = 5;
+  let pages = 0;
+  while (url && pages < MAX_PAGES) {
+    pages++;
+    const res = await fetchWithTimeout(url, {}, 15000);
     if (!res.ok) throw new Error(`IG media list ${res.status}: ${(await res.text()).slice(0, 300)}`);
     const data = await res.json();
     items = items.concat(data.data || []);
@@ -307,11 +312,18 @@ async function fetchAllFacebookVideos() {
   // 50-per-page became expensive enough for Facebook to reject the request
   // outright ("reduce the amount of data you're asking for") once the Page
   // had enough video history; more, smaller pages instead of fewer, bigger ones.
+  // Also hard-capped at MAX_PAGES: a Page with years of video history can
+  // have hundreds of entries, and this function is only ever used to rank
+  // "most viewed" against a small, known set of recent reel URLs — walking
+  // every page the account has ever had turns one request into minutes.
   let url = `https://graph.facebook.com/${GRAPH_VERSION}/${pageId}/videos` +
     `?fields=id,title,permalink_url,views,created_time,thumbnails.limit(5){uri,width,height,is_preferred}` +
     `&limit=10&access_token=${encodeURIComponent(token)}`;
-  while (url) {
-    const res = await fetch(url);
+  const MAX_PAGES = 5;
+  let pages = 0;
+  while (url && pages < MAX_PAGES) {
+    pages++;
+    const res = await fetchWithTimeout(url, {}, 15000);
     if (!res.ok) throw new Error(`FB videos list ${res.status}: ${(await res.text()).slice(0, 300)}`);
     const data = await res.json();
     items = items.concat(data.data || []);
