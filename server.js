@@ -73,6 +73,21 @@ function saveNewsroomCache(data) {
   fs.writeFileSync(NEWSROOM_CACHE_PATH, JSON.stringify({ fetched_at: Date.now(), data }, null, 2));
 }
 
+// Scraping external sites (Facebook share links, news articles) has no
+// guaranteed response time — some targets are slow or silently drop the
+// connection from this server's network. A plain fetch() with no timeout
+// hangs for the platform default (tens of seconds), blocking the whole
+// request behind it. Abort and move on instead.
+async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function detectPlatform(url) {
   if (/instagram\.com/i.test(url)) return 'instagram';
   if (/facebook\.com|fb\.watch/i.test(url)) return 'facebook';
@@ -114,7 +129,7 @@ async function fetchMetaOEmbed(url, platform) {
 }
 
 async function fetchOgImage(url) {
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ThumbnailFetchBot/1.0)' },
     redirect: 'follow',
   });
@@ -178,7 +193,7 @@ async function resolveFbVideoId(url, sharedMap) {
   if (map[url]) return map[url];
 
   try {
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
       redirect: 'follow',
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ThumbnailFetchBot/1.0)' },
     });
