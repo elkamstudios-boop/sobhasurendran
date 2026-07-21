@@ -303,9 +303,13 @@ async function fetchAllFacebookVideos() {
   // source image at full resolution (1080x1920) with is_preferred flagged.
   // Capped at limit(5) — the uncapped edge returns every auto-generated frame
   // and roughly triples the per-page response time across a large video list.
+  // Page size capped at 10 (was 50) — with the nested thumbnails sub-query,
+  // 50-per-page became expensive enough for Facebook to reject the request
+  // outright ("reduce the amount of data you're asking for") once the Page
+  // had enough video history; more, smaller pages instead of fewer, bigger ones.
   let url = `https://graph.facebook.com/${GRAPH_VERSION}/${pageId}/videos` +
     `?fields=id,title,permalink_url,views,created_time,thumbnails.limit(5){uri,width,height,is_preferred}` +
-    `&limit=50&access_token=${encodeURIComponent(token)}`;
+    `&limit=10&access_token=${encodeURIComponent(token)}`;
   while (url) {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`FB videos list ${res.status}: ${(await res.text()).slice(0, 300)}`);
