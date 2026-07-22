@@ -409,9 +409,27 @@ async function fetchGoogleNewsRss(query) {
     const link = $el.find('link').first().text();
     const pubDate = $el.find('pubDate').first().text();
     const source = $el.find('source').first().text();
-    if (title && link) items.push({ title, link, pubDate, source });
+    const sourceUrl = $el.find('source').first().attr('url') || '';
+    if (title && link) items.push({ title, link, pubDate, source, sourceUrl });
   });
   return items;
+}
+
+// Google News RSS links redirect via client-side JS, so a server-side fetch
+// only ever sees Google's own interstitial page — which includes a preview
+// image only when Google's crawler happened to generate one (mostly recent
+// articles; older ones often have none, and there's no more accurate source
+// to scrape instead). When that's missing, fall back to the publication's
+// own logo via Google's public favicon service, keyed off the domain the
+// RSS <source> tag already gives us.
+function publisherFaviconUrl(sourceUrl) {
+  if (!sourceUrl) return null;
+  try {
+    const host = new URL(sourceUrl).hostname;
+    return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=128`;
+  } catch {
+    return null;
+  }
 }
 
 async function getNewsArticles(sharedCache) {
@@ -425,7 +443,7 @@ async function getNewsArticles(sharedCache) {
       title: item.title,
       summary: null,
       url: item.link,
-      thumbnail_url: resolved.thumbnail_url,
+      thumbnail_url: resolved.thumbnail_url || publisherFaviconUrl(item.sourceUrl),
       source: item.source || 'News',
       published_at: item.pubDate ? new Date(item.pubDate).toISOString() : null,
     };
